@@ -1,0 +1,100 @@
+name: Tests
+
+on:
+  push:
+    branches: [develop]
+    tags: ["v*"]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    # Django 6.0 is what a client build resolves today when nothing constrains
+    # it, while the reference deployment runs 5.2. Report it without letting it
+    # block a release until the stack itself has moved.
+    continue-on-error: ${{ matrix.experimental }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {python-version: "3.12", django: "5.2", experimental: false}
+          - {python-version: "3.13", django: "5.2", experimental: false}
+          - {python-version: "3.13", django: "6.0", experimental: true}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e . "Django~=${{ matrix.django }}.0" pytest pytest-django mock
+      # The selenium test drives a real Firefox, which this runner does not have.
+      - name: Test
+        run: pytest tests --ignore=tests/test_selenium.py
+      # The reason this fork exists: upstream 1.3.5's migrations disagree with
+      # its models. Keep it that way only by checking.
+      - name: Check migrations match the models
+        run: |
+          python -c "
+          from tests.conftest import pytest_configure
+          pytest_configure()
+          from django.core.management import call_command
+          call_command('makemigrations', 'hitcount', '--check', '--dry-run')
+          "
+
+  publish:
+    needs: [test]
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install build tooling
+        run: pip install build twine
+
+      # The version comes from hitcount/__init__.py, not from the tag, so the
+      # two can silently disagree, as pure-ai-suite's v0.3.1 once did.
+      - name: Check the tag matches the declared version
+        run: |
+          declared=$(python -c "import hitcount; print(hitcount.__version__)")
+          tagged="${GITHUB_REF_NAME#v}"
+          echo "declared=$declared tag=$tagged"
+          if [ "$declared" != "$tagged" ]; then
+            echo "::error::Tag $GITHUB_REF_NAME does not match hitcount.__version__ ($declared)."
+            echo "Bump hitcount/__init__.py first, then tag that commit."
+            exit 1
+          fi
+
+      - name: Build sdist and wheel
+        run: python -m build
+
+      - name: Check package metadata
+        run: twine check dist/*
+
+      - name: Check the Cloudsmith credential is present
+        env:
+          TWINE_PASSWORD: ${{ secrets.CLOUDSMITH_API_KEY }}
+        run: |
+          if [ -z "$TWINE_PASSWORD" ]; then
+            echo "::error::CLOUDSMITH_API_KEY is not set in this repository's Actions secrets."
+            echo "Add it under Settings > Secrets and variables > Actions, then re-run this job."
+            exit 1
+          fi
+
+      # No --skip-existing: twine 7.0.0 raises UnsupportedConfiguration for any
+      # repository URL that is not PyPI or TestPyPI, and twine is unpinned here.
+      - name: Publish to Cloudsmith
+        env:
+          TWINE_USERNAME: token
+          TWINE_PASSWORD: ${{ secrets.CLOUDSMITH_API_KEY }}
+        run: |
+          twine upload --non-interactive \
+            --repository-url "https://python.cloudsmith.io/pure-creative/pure-stack/" \
+            dist/*

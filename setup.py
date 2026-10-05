@@ -15,7 +15,7 @@ setup(
     version=hitcount.__version__,
     include_package_data=True,
     packages=['hitcount'],
-    url='http://github.com/thornomad/django-hitcount',
+    url='https://github.com/pure-creative/django-hitcount',
     license='BSD',
     description="Hit counting application for Django.",
     long_description=README,
